@@ -1,6 +1,6 @@
 import aiosqlite
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from loguru import logger
 from models import User
 from config import config
@@ -37,7 +37,6 @@ class Database:
                     columns = await cursor.fetchall()
                     column_names = [col[1] for col in columns]
 
-                # Добавляем недостающие столбцы
                 if 'is_super_admin' not in column_names:
                     await db.execute("ALTER TABLE users ADD COLUMN is_super_admin BOOLEAN DEFAULT 0")
                     logger.info("✅ Добавлен столбец is_super_admin")
@@ -84,13 +83,62 @@ class Database:
                 await db.commit()
                 logger.info("✅ База данных создана")
 
+            # Создаем новые таблицы для определения возраста
+            await self._create_age_tables(db)
+
             # Добавляем супер-админа в БД
             await self._init_super_admin()
+
+    async def _create_age_tables(self, db):
+        """Создание таблиц для определения возраста"""
+        # Таблица брендов
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS brands (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                country TEXT,
+                info TEXT,
+                type TEXT DEFAULT 'foreign',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Таблица диапазонов серийных номеров
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS serial_ranges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                brand_id INTEGER NOT NULL,
+                serial_start INTEGER NOT NULL,
+                serial_end INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                model TEXT,
+                info TEXT,
+                FOREIGN KEY (brand_id) REFERENCES brands(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Индексы для быстрого поиска
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_serial_ranges_brand 
+            ON serial_ranges(brand_id)
+        """)
+
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_brands_name 
+            ON brands(name)
+        """)
+
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_brands_type 
+            ON brands(type)
+        """)
+
+        await db.commit()
+        logger.info("✅ Таблицы для определения возраста созданы")
 
     async def _init_super_admin(self):
         """Добавление супер-админа в БД"""
         if config.super_admin:
-            # Проверяем, есть ли уже супер-админ
             existing = await self.get_user(config.super_admin)
             if not existing:
                 user_data = {
@@ -105,7 +153,6 @@ class Database:
                 await self.add_user(user_data)
                 logger.info(f"👑 Супер-админ {config.super_admin} добавлен в БД")
             else:
-                # Обновляем статус супер-админа
                 async with aiosqlite.connect(self.db_path) as db:
                     await db.execute("""
                         UPDATE users 
@@ -115,8 +162,131 @@ class Database:
                     await db.commit()
                     logger.info(f"👑 Супер-админ {config.super_admin} обновлен в БД")
 
+    # ============ МЕТОДЫ ДЛЯ БРЕНДОВ ============
+
+    async def add_brand(self, name: str, country: str, info: str, brand_type: str = 'foreign') -> int:
+        """Добавление нового бренда"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                INSERT INTO brands (name, country, info, type)
+                VALUES (?, ?, ?, ?)
+            """, (name, country, info, brand_type))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_brand_by_name(self, name: str, brand_type: Optional[str] = None) -> Optional[Dict]:
+        """Поиск бренда по названию"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            query = "SELECT * FROM brands WHERE LOWER(name) = LOWER(?)"
+            params = [name]
+
+            if brand_type:
+                query += " AND type = ?"
+                params.append(brand_type)
+
+            async with db.execute(query, params) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+    async def search_brands(self, query: str, brand_type: Optional[str] = None, limit: int = 10) -> List[Dict]:
+        """Поиск брендов по частичному совпадению"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            sql_query = """
+                SELECT * FROM brands 
+                WHERE LOWER(name) LIKE LOWER(?)
+            """
+            params = [f"%{query}%"]
+
+            if brand_type:
+                sql_query += " AND type = ?"
+                params.append(brand_type)
+
+            sql_query += " LIMIT ?"
+            params.append(limit)
+
+            async with db.execute(sql_query, params) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    async def get_all_brands(self, brand_type: Optional[str] = None) -> List[Dict]:
+        """Получение всех брендов"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            query = "SELECT * FROM brands"
+            params = []
+
+            if brand_type:
+                query += " WHERE type = ?"
+                params.append(brand_type)
+
+            query += " ORDER BY name"
+
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+    async def add_serial_range(self, brand_id: int, serial_start: int, serial_end: int, year: int,
+                               model: Optional[str] = None, info: Optional[str] = None) -> int:
+        """Добавление диапазона серийных номеров"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("""
+                INSERT INTO serial_ranges 
+                (brand_id, serial_start, serial_end, year, model, info)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (brand_id, serial_start, serial_end, year, model, info))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def find_age_by_serial(self, brand_id: int, serial_number: int) -> Optional[Dict]:
+        """Поиск года выпуска по серийному номеру"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT * FROM serial_ranges 
+                WHERE brand_id = ? AND serial_start <= ? AND serial_end >= ?
+                ORDER BY year ASC
+                LIMIT 1
+            """, (brand_id, serial_number, serial_number)) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+    async def get_brand_with_ranges(self, brand_id: int) -> Optional[Dict]:
+        """Получение бренда со всеми диапазонами"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            # Получаем бренд
+            async with db.execute("SELECT * FROM brands WHERE id = ?", (brand_id,)) as cursor:
+                brand = await cursor.fetchone()
+                if not brand:
+                    return None
+
+                brand_dict = dict(brand)
+
+            # Получаем диапазоны
+            async with db.execute("""
+                SELECT * FROM serial_ranges 
+                WHERE brand_id = ? 
+                ORDER BY serial_start
+            """, (brand_id,)) as cursor:
+                ranges = await cursor.fetchall()
+                brand_dict['ranges'] = [dict(row) for row in ranges]
+
+            return brand_dict
+
+    async def clear_brands_data(self) -> None:
+        """Очистка данных о брендах (для переимпорта)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM serial_ranges")
+            await db.execute("DELETE FROM brands")
+            await db.commit()
+            logger.info("🗑️ Данные о брендах очищены")
+
+    # ============ СУЩЕСТВУЮЩИЕ МЕТОДЫ ============
+
     async def fetch_all(self, query: str, params: tuple = ()) -> List[Dict]:
-        """Выполнение SELECT запроса и возврат всех результатов"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(query, params)
@@ -124,7 +294,6 @@ class Database:
             return [dict(row) for row in rows]
 
     async def fetch_one(self, query: str, params: tuple = ()) -> Optional[Dict]:
-        """Выполнение SELECT запроса и возврат одного результата"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(query, params)
@@ -132,7 +301,6 @@ class Database:
             return dict(row) if row else None
 
     async def add_user(self, user_data: dict) -> User:
-        """Добавление нового пользователя"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO users 
@@ -151,7 +319,6 @@ class Database:
             return await self.get_user(user_data['user_id'])
 
     async def get_user(self, user_id: int) -> Optional[User]:
-        """Получение пользователя по ID"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -159,7 +326,6 @@ class Database:
             ) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    # Преобразуем Row в dict для безопасного доступа
                     row_dict = dict(row)
                     return User(
                         user_id=row_dict['user_id'],
@@ -176,7 +342,6 @@ class Database:
                 return None
 
     async def get_subscribed_users(self) -> List[User]:
-        """Получение всех подписанных пользователей"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             users = []
@@ -200,7 +365,6 @@ class Database:
             return users
 
     async def toggle_subscription(self, user_id: int, subscribe: bool) -> bool:
-        """Изменение статуса подписки"""
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 UPDATE users 
@@ -215,7 +379,6 @@ class Database:
             return True
 
     async def save_calculation(self, calc_data: dict) -> int:
-        """Сохранение результата расчета"""
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute("""
                 INSERT INTO calculations 
@@ -237,7 +400,6 @@ class Database:
             return cursor.lastrowid
 
     async def get_statistics(self) -> Dict[str, int]:
-        """Получение статистики"""
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute("SELECT COUNT(*) FROM users") as cursor:
                 total = (await cursor.fetchone())[0]
@@ -267,29 +429,24 @@ class Database:
             }
 
     async def is_user_allowed(self, user_id: int) -> bool:
-        """Проверка доступа пользователя (для канала, чата, калькулятора)"""
         user = await self.get_user(user_id)
         if not user:
             return False
-        # Доступ есть у супер-админа, админа или подписанного пользователя
         return user.is_super_admin or user.is_admin or user.is_subscribed
 
     async def is_admin(self, user_id: int) -> bool:
-        """Проверка, является ли пользователь администратором (супер-админ или админ)"""
         user = await self.get_user(user_id)
         if not user:
             return False
         return user.is_super_admin or user.is_admin
 
     async def is_super_admin(self, user_id: int) -> bool:
-        """Проверка, является ли пользователь супер-админом"""
         user = await self.get_user(user_id)
         if not user:
             return False
         return user.is_super_admin
 
     async def get_all_users(self) -> List[User]:
-        """Получение всех пользователей"""
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             users = []
@@ -313,9 +470,7 @@ class Database:
             return users
 
     async def is_admin_in_env(self, user_id: int) -> bool:
-        """Проверка, есть ли пользователь в списке админов из .env"""
         return user_id in config.admin_ids
 
     async def is_super_admin_in_env(self, user_id: int) -> bool:
-        """Проверка, является ли пользователь супер-админом из .env"""
         return user_id == config.super_admin

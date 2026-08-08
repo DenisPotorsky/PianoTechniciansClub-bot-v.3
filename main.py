@@ -25,18 +25,22 @@ from loguru import logger
 
 from config import config
 from database import Database
+from age_database import AgeDatabase
 from handlers.calculator import CalculatorHandler, SELECT_WINDING, CORE_DIAM, TOTAL_DIAM, LENGTH
 from handlers.club import ClubHandler
 from handlers.admin import AdminHandler
+from handlers.age import AgeHandler, SELECT_TYPE, BRAND_INPUT, SERIAL_INPUT
 from keyboard.menus import MenuBuilder
 
 
 class PianoClubBot:
     def __init__(self):
         self.db = Database(config.database_path)
+        self.age_db = AgeDatabase("piano_age.db")  # ← НОВАЯ БАЗА
         self.calculator_handler = CalculatorHandler(self.db)
         self.club_handler = ClubHandler(self.db)
         self.admin_handler = AdminHandler(self.db)
+        self.age_handler = AgeHandler(self.age_db)  # ← ПЕРЕДАЁМ НОВУЮ БАЗУ
         self.app = None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -44,11 +48,9 @@ class PianoClubBot:
         if not user:
             return
 
-        # Проверяем роли
         is_super_admin = await self.db.is_super_admin_in_env(user.id)
         is_admin = await self.db.is_admin_in_env(user.id)
 
-        # Регистрируем пользователя
         user_data = {
             'user_id': user.id,
             'username': user.username,
@@ -71,7 +73,7 @@ class PianoClubBot:
         elif db_user.is_admin:
             greeting += "⭐ *Администратор*\n\nВам доступны все функции бота."
         elif is_allowed:
-            greeting += "✅ *Доступ предоставлен*\n\nВы можете использовать все функции бота:\n• Калькулятор басовых струн\n• Участие в чате\n• Просмотр канала"
+            greeting += "✅ *Доступ предоставлен*\n\nВы можете использовать все функции бота:\n• Калькулятор басовых струн\n• Определение возраста инструмента\n• Участие в чате\n• Просмотр канала"
         else:
             greeting += (
                 "🔒 *Доступ ограничен*\n\n"
@@ -83,7 +85,6 @@ class PianoClubBot:
                 "Доступ предоставляется персонально."
             )
 
-        # Уведомление админам о новом пользователе
         if not is_allowed and not db_user.is_super_admin and not db_user.is_admin:
             await self.notify_admins_about_new_user(update, context, db_user)
 
@@ -96,7 +97,6 @@ class PianoClubBot:
         logger.info(f"Пользователь {user.id} (@{user.username}) запустил бота")
 
     async def notify_admins_about_new_user(self, update: Update, context: ContextTypes.DEFAULT_TYPE, user):
-        """Уведомление администраторов о новом пользователе"""
         admins = [config.super_admin] + config.admin_ids
         username = f"@{user.username}" if user.username else "нет"
         full_name = user.full_name
@@ -134,14 +134,12 @@ class PianoClubBot:
         )
 
     async def set_bot_commands(self):
-        """Установка команд для синей кнопки меню"""
         commands = [
             BotCommand("start", "🏠 Главное меню"),
             BotCommand("about", "ℹ️ О проекте"),
             BotCommand("support", "❓ Поддержка"),
         ]
 
-        # Админские команды доступны всем админам
         if config.super_admin or config.admin_ids:
             commands.extend([
                 BotCommand("admin", "👥 Админ-панель"),
@@ -179,8 +177,37 @@ class PianoClubBot:
         self.app.add_handler(CallbackQueryHandler(self.admin_handler.show_statistics, pattern="^admin_stats$"))
         self.app.add_handler(CallbackQueryHandler(self.admin_handler.broadcast_start, pattern="^admin_broadcast$"))
 
+        # ==================== ОПРЕДЕЛЕНИЕ ВОЗРАСТА ====================
+        age_conv_handler = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(self.age_handler.start, pattern="^age_start$"),
+            ],
+            states={
+                SELECT_TYPE: [
+                    CallbackQueryHandler(self.age_handler.select_type, pattern="^age_(foreign|russian)$"),
+                    CallbackQueryHandler(self.age_handler.cancel, pattern="^main_menu$"),
+                ],
+                BRAND_INPUT: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.age_handler.get_brand),
+                    CallbackQueryHandler(self.age_handler.back_to_type, pattern="^age_back_to_type$"),
+                    CallbackQueryHandler(self.age_handler.cancel, pattern="^main_menu$"),
+                ],
+                SERIAL_INPUT: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.age_handler.get_serial),
+                    CallbackQueryHandler(self.age_handler.back_to_brand, pattern="^age_back_to_brand$"),
+                    CallbackQueryHandler(self.age_handler.cancel, pattern="^main_menu$"),
+                ],
+            },
+            fallbacks=[
+                CallbackQueryHandler(self.age_handler.cancel, pattern="^(main_menu|age_cancel)$"),
+                CommandHandler("start", self.start),
+            ],
+            allow_reentry=True,
+            per_message=False,
+        )
+        self.app.add_handler(age_conv_handler)
+
         # ==================== КАЛЬКУЛЯТОР ====================
-        # Создаем ConversationHandler для калькулятора
         calc_conv_handler = ConversationHandler(
             entry_points=[
                 CallbackQueryHandler(self.calculator_handler.start_calculation, pattern="^calculator_start$"),
@@ -210,10 +237,10 @@ class PianoClubBot:
             fallbacks=[
                 CallbackQueryHandler(self.calculator_handler.cancel_calculation, pattern="^(main_menu|calc_cancel)$"),
                 CommandHandler("start", self.start),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, self.calculator_handler.cancel_calculation),
             ],
             allow_reentry=True,
             per_message=False,
+            name="calculator_conversation",
         )
         self.app.add_handler(calc_conv_handler)
 
@@ -238,6 +265,10 @@ class PianoClubBot:
         logger.info("🚀 Бот запущен!")
         logger.info(f"👑 Супер-админ: {config.super_admin}")
         logger.info(f"⭐ Админы: {config.admin_ids}")
+
+        # Проверяем, что база данных возраста загружена
+        brands_count = await self.age_db.get_brand_count()
+        logger.info(f"📊 Брендов в piano_age.db: {brands_count}")
 
         await self.app.initialize()
         await self.app.start()

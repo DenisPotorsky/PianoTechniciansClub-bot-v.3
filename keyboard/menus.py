@@ -16,6 +16,8 @@ class MenuBuilder:
             keyboard.append([InlineKeyboardButton("📢 Канал", callback_data="channel")])
             keyboard.append([InlineKeyboardButton("💬 Чат", callback_data="chat")])
             keyboard.append([InlineKeyboardButton("🧮 Калькулятор басовых струн", callback_data="calculator_start")])
+            keyboard.append([InlineKeyboardButton("🔍 Определить возраст инструмента", callback_data="age_start")])  #
+            # НОВАЯ КНОПКА
         else:
             keyboard.append([InlineKeyboardButton("🔑 Запросить доступ", callback_data="request_access")])
 
@@ -87,18 +89,15 @@ class MenuBuilder:
 
     @staticmethod
     def get_user_action_menu(user, current_user_id: int) -> InlineKeyboardMarkup:
-        """Меню действий с пользователем"""
         keyboard = []
 
-        # Проверяем, что user - это объект, а не число
-        if hasattr(user, 'is_super_admin') and hasattr(user, 'is_admin'):
+        if user and hasattr(user, 'is_super_admin') and hasattr(user, 'is_admin'):
             if not user.is_super_admin and not user.is_admin:
                 action = "🔴 Удалить из клуба" if user.is_subscribed else "🟢 Добавить в клуб"
                 keyboard.append([InlineKeyboardButton(action, callback_data=f"admin_toggle_{user.user_id}")])
             else:
                 keyboard.append([InlineKeyboardButton("ℹ️ Нельзя управлять", callback_data="admin_no_action")])
         else:
-            # Если user - это число (user_id) или что-то другое
             keyboard.append([InlineKeyboardButton("ℹ️ Нельзя управлять", callback_data="admin_no_action")])
 
         keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_users")])
