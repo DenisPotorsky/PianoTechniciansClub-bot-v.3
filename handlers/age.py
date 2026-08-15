@@ -137,16 +137,34 @@ class AgeHandler:
         brand_type = context.user_data.get('brand_type', 'foreign')
 
         # Выполняем поиск
-        result = await self.detector.detect(brand_name, serial, brand_type)
+        try:
+            result = await self.detector.detect(brand_name, serial, brand_type)
+        except Exception as e:
+            logger.error(f"Ошибка при поиске: {e}")
+            await update.message.reply_text(
+                "❌ Произошла ошибка при поиске. Попробуйте снова.",
+                reply_markup=MenuBuilder.get_back_menu()
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        # Проверяем результат
+        if not result:
+            await update.message.reply_text(
+                "❌ Не удалось получить результат. Попробуйте снова.",
+                reply_markup=MenuBuilder.get_back_menu()
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
 
         if result.found:
             # Успешный результат
             result_text = (
                 "🎹 РЕЗУЛЬТАТ ОПРЕДЕЛЕНИЯ ВОЗРАСТА\n"
                 "═══════════════════════════════════\n\n"
-                f"🏷️ Бренд: {result.brand}\n"
-                f"🔢 Серийный номер: {result.serial}\n"
-                f"📅 Год выпуска: {result.year}\n"
+                f"🏷️ Бренд: {result.brand or brand_name}\n"
+                f"🔢 Серийный номер: {result.serial or serial}\n"
+                f"📅 Год выпуска: {result.year if result.year else 'Не определён'}\n"
             )
 
             if result.country:
@@ -182,8 +200,10 @@ class AgeHandler:
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
+            error_message = result.message if result.message else "Произошла ошибка при поиске."
+
             await update.message.reply_text(
-                f"❌ {result.message}",
+                f"❌ {error_message}",
                 reply_markup=reply_markup
             )
 

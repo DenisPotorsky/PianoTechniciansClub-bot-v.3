@@ -1,147 +1,168 @@
 """
-Модуль для определения возраста фортепиано
+Модуль для определения возраста фортепиано по серийному номеру
 """
 
-import logging
-from typing import Optional, Dict, Any, List
+import re
+from typing import Optional, Dict, List, Tuple
 from dataclasses import dataclass
-
-logger = logging.getLogger(__name__)
+from loguru import logger
+from age_database import AgeDatabase
 
 
 @dataclass
 class AgeResult:
     """Результат определения возраста"""
-    brand_name: str
-    brand_country: str
-    serial_number: int
-    year: Optional[int]
-    found: bool
-    message: str
-    brand_info: Optional[str] = None
+    found: bool = False
+    brand: Optional[str] = None
+    country: Optional[str] = None
+    info: Optional[str] = None
+    serial: Optional[str] = None
+    year: Optional[int] = None
+    model: Optional[str] = None
+    error: Optional[str] = None
+    message: Optional[str] = None
     brand_type: Optional[str] = None
-    similar_brands: Optional[List[str]] = None
 
 
 class AgeDetector:
-    """Класс для определения возраста фортепиано по бренду и серийному номеру"""
+    """
+    Определение возраста фортепиано
+    Использует отдельную базу данных piano_age.db
+    """
 
-    def __init__(self, database):
-        """
-        Инициализация детектора
+    def __init__(self, db: AgeDatabase):
+        self.db = db
+        logger.info("AgeDetector инициализирован")
 
-        Args:
-            database: Экземпляр AgeDatabase
-        """
-        self.db = database
-        logger.info("AgeDetector initialized")
+    @staticmethod
+    def extract_numbers(text: str) -> Optional[int]:
+        """Извлечение чисел из строки"""
+        numbers = re.findall(r'\d+', text)
+        if not numbers:
+            return None
+        return int(numbers[0])
 
-    async def detect(self, brand_name: str, serial_number: str, brand_type: str = None) -> AgeResult:
+    @staticmethod
+    def clean_serial(serial: str) -> str:
+        """Очистка серийного номера от лишних символов"""
+        return re.sub(r'[^0-9a-zA-Z]', '', serial.strip())
+
+    async def find_brand(self, brand_name: str, brand_type: Optional[str] = None) -> Optional[Dict]:
         """
-        Определение возраста фортепиано (регистронезависимый поиск)
+        Поиск бренда в БД с регистронезависимым поиском
+        """
+        logger.info(f"🔍 Поиск бренда: '{brand_name}', тип: {brand_type}")
+
+        # Пробуем найти точное совпадение (регистронезависимо)
+        all_brands = await self.db.get_all_brands(brand_type)
+
+        # Ищем точное совпадение (игнорируя регистр)
+        for brand in all_brands:
+            if brand['name'].lower() == brand_name.lower():
+                logger.info(f"✅ Найден бренд: {brand['name']}")
+                return brand
+
+        # Ищем частичное совпадение
+        for brand in all_brands:
+            if brand_name.lower() in brand['name'].lower() or brand['name'].lower() in brand_name.lower():
+                logger.info(f"✅ Найден бренд по частичному совпадению: {brand['name']}")
+                return brand
+
+        logger.warning(f"❌ Бренд не найден: {brand_name}")
+        return None
+
+    async def get_available_brands(self, brand_type: str = 'foreign', limit: int = 10) -> List[str]:
+        """Получение списка доступных брендов"""
+        brands = await self.db.get_all_brands(brand_type)
+        return [f"{b['name']} ({b['country']})" for b in brands[:limit]]
+
+    async def detect(self, brand_name: str, serial_number: str, brand_type: str = 'foreign') -> AgeResult:
+        """
+        Основной метод определения возраста
 
         Args:
             brand_name: Название бренда
-            serial_number: Серийный номер (строка)
-            brand_type: 'foreign' или 'russian' (опционально)
+            serial_number: Серийный номер
+            brand_type: 'foreign' или 'russian'
 
         Returns:
-            AgeResult с результатами поиска
+            AgeResult: Результат определения
         """
-        # Извлекаем цифры из серийного номера
-        serial_int = await self.db.extract_serial_number(serial_number)
-        if serial_int is None:
-            return AgeResult(
-                brand_name=brand_name,
-                brand_country="",
-                serial_number=0,
-                year=None,
-                found=False,
-                message="❌ Не удалось распознать серийный номер. Введите только цифры."
-            )
-
-        # Ищем бренд (регистронезависимый поиск)
-        brand = await self.db.get_brand_by_name(brand_name)
-
-        # Если бренд не найден, ищем похожие (регистронезависимый поиск)
-        if not brand:
-            similar = await self.db.search_brands(brand_name, brand_type, limit=10)
-            similar_names = [b['name'] for b in similar]
-
-            if similar_names:
+        try:
+            # Очищаем серийный номер
+            serial_clean = self.clean_serial(serial_number)
+            if not serial_clean:
                 return AgeResult(
-                    brand_name=brand_name,
-                    brand_country="",
-                    serial_number=serial_int,
-                    year=None,
                     found=False,
-                    message=f"❌ Бренд '{brand_name}' не найден.\n\nВозможно, вы имели в виду:\n" + "\n".join(f"• {name}" for name in similar_names[:10]),
-                    similar_brands=similar_names
+                    error="invalid_serial",
+                    message="Не удалось распознать серийный номер."
                 )
-            else:
-                # Показываем все доступные бренды
-                all_brands = await self.db.get_all_brands(brand_type)
-                if all_brands:
-                    brands_list = "\n".join(f"• {b['name']}" for b in all_brands[:10])
-                    return AgeResult(
-                        brand_name=brand_name,
-                        brand_country="",
-                        serial_number=serial_int,
-                        year=None,
-                        found=False,
-                        message=f"❌ Бренд '{brand_name}' не найден.\n\nДоступные бренды:\n{brands_list}\n\nВведите точное название бренда."
-                    )
-                else:
-                    return AgeResult(
-                        brand_name=brand_name,
-                        brand_country="",
-                        serial_number=serial_int,
-                        year=None,
-                        found=False,
-                        message="❌ Бренд не найден. В базе данных пока нет брендов."
-                    )
 
-        # Ищем год по серийному номеру
-        year = await self.db.find_age_by_serial(brand['id'], serial_int)
+            # Извлекаем число из серийного номера
+            serial_num = self.extract_numbers(serial_clean)
+            if serial_num is None:
+                return AgeResult(
+                    found=False,
+                    error="invalid_serial",
+                    message=f"Не удалось распознать серийный номер '{serial_number}'. Пожалуйста, введите номер в цифровом формате."
+                )
 
-        if year:
+            # Ищем бренд (регистронезависимо)
+            brand = await self.find_brand(brand_name, brand_type)
+            if not brand:
+                # Показываем доступные бренды
+                brands_list = await self.get_available_brands(brand_type)
+                brands_text = "\n".join([f"• {b}" for b in brands_list])
+
+                return AgeResult(
+                    found=False,
+                    error="brand_not_found",
+                    message=f"Бренд '{brand_name}' не найден в базе.\n\n💡 Проверьте написание или попробуйте ввести бренд на языке оригинала.\n\nДоступные бренды:\n{brands_text}"
+                )
+
+            # Ищем серийный номер
+            range_data = await self.db.find_age_by_serial(brand['id'], serial_num)
+
+            # Проверяем, что range_data - это словарь, а не число
+            if not range_data or not isinstance(range_data, dict):
+                return AgeResult(
+                    found=False,
+                    error="serial_not_found",
+                    message=f"Серийный номер {serial_clean} для бренда '{brand['name']}' не найден.\n\nВозможные причины:\n• Проверьте правильность ввода\n• Номер может быть на другой части инструмента\n• Возможно, номер относится к другой модели\n\n📞 Рекомендуем обратиться к мастеру для точной диагностики."
+                )
+
+            # Успешный результат
             return AgeResult(
-                brand_name=brand['name'],
-                brand_country=brand.get('country', ''),
-                serial_number=serial_int,
-                year=year,
                 found=True,
-                message=f"✅ {brand['name']} ({brand.get('country', '')}) — год выпуска: {year}",
-                brand_info=brand.get('info', ''),
-                brand_type=brand.get('type', '')
+                brand=brand.get('name', brand_name),
+                country=brand.get('country', 'Неизвестно'),
+                info=brand.get('info', ''),
+                serial=serial_clean,
+                year=range_data.get('year'),
+                model=range_data.get('model'),
+                brand_type=brand.get('type', brand_type)
             )
-        else:
-            # Проверяем, есть ли вообще диапазоны для этого бренда
-            ranges = await self.db.get_serial_ranges(brand['id'])
-            if not ranges:
-                return AgeResult(
-                    brand_name=brand['name'],
-                    brand_country=brand.get('country', ''),
-                    serial_number=serial_int,
-                    year=None,
-                    found=False,
-                    message=f"⚠️ Для бренда '{brand['name']}' пока нет данных по серийным номерам.\n\nПожалуйста, обратитесь к администратору для добавления информации.",
-                    brand_info=brand.get('info', ''),
-                    brand_type=brand.get('type', '')
-                )
-            else:
-                # Показываем доступные диапазоны
-                ranges_text = "\n".join(
-                    f"• {r['serial_start']} - {r['serial_end']} → {r['year']} г."
-                    for r in ranges[:5]
-                )
-                return AgeResult(
-                    brand_name=brand['name'],
-                    brand_country=brand.get('country', ''),
-                    serial_number=serial_int,
-                    year=None,
-                    found=False,
-                    message=f"⚠️ Серийный номер {serial_int} не найден для бренда '{brand['name']}'.\n\nДоступные диапазоны:\n{ranges_text}\n\nПроверьте правильность серийного номера.",
-                    brand_info=brand.get('info', ''),
-                    brand_type=brand.get('type', '')
-                )
+
+        except Exception as e:
+            logger.error(f"Ошибка определения возраста: {e}")
+            import traceback
+            traceback.print_exc()
+            return AgeResult(
+                found=False,
+                error="database_error",
+                message="База данных временно недоступна. Пожалуйста, попробуйте позже или обратитесь к администратору."
+            )
+
+    async def get_stats(self) -> Dict:
+        """Получение статистики по базе данных"""
+        brands_count = await self.db.get_brand_count()
+        ranges_count = await self.db.get_ranges_count()
+        foreign_count = await self.db.get_brand_count('foreign')
+        russian_count = await self.db.get_brand_count('russian')
+
+        return {
+            "total_brands": brands_count,
+            "total_ranges": ranges_count,
+            "foreign_brands": foreign_count,
+            "russian_brands": russian_count
+        }
