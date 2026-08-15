@@ -3,7 +3,8 @@
 """
 
 import re
-from typing import Optional, Dict, List, Tuple
+import unicodedata
+from typing import Optional, Dict, List
 from dataclasses import dataclass
 from loguru import logger
 from age_database import AgeDatabase
@@ -25,14 +26,21 @@ class AgeResult:
 
 
 class AgeDetector:
-    """
-    Определение возраста фортепиано
-    Использует отдельную базу данных piano_age.db
-    """
+    """Определение возраста фортепиано"""
 
     def __init__(self, db: AgeDatabase):
         self.db = db
         logger.info("AgeDetector инициализирован")
+
+    @staticmethod
+    def normalize_string(text: str) -> str:
+        """
+        Нормализация строки: удаление диакритических знаков и приведение к нижнему регистру
+        """
+        text = text.lower()
+        normalized = unicodedata.normalize('NFKD', text)
+        without_diacritics = ''.join(c for c in normalized if not unicodedata.combining(c))
+        return without_diacritics
 
     @staticmethod
     def extract_numbers(text: str) -> Optional[int]:
@@ -44,28 +52,33 @@ class AgeDetector:
 
     @staticmethod
     def clean_serial(serial: str) -> str:
-        """Очистка серийного номера от лишних символов"""
+        """Очистка серийного номера"""
         return re.sub(r'[^0-9a-zA-Z]', '', serial.strip())
 
     async def find_brand(self, brand_name: str, brand_type: Optional[str] = None) -> Optional[Dict]:
         """
-        Поиск бренда в БД с регистронезависимым поиском
+        Поиск бренда с нормализацией
         """
-        logger.info(f"🔍 Поиск бренда: '{brand_name}', тип: {brand_type}")
+        logger.info(f"🔍 Поиск бренда: '{brand_name}'")
 
-        # Пробуем найти точное совпадение (регистронезависимо)
+        normalized_input = self.normalize_string(brand_name)
+        logger.info(f"📝 Нормализованный ввод: '{normalized_input}'")
+
         all_brands = await self.db.get_all_brands(brand_type)
+        logger.info(f"📋 Всего брендов в базе: {len(all_brands)}")
 
-        # Ищем точное совпадение (игнорируя регистр)
+        # 1. Точное совпадение (нормализованное)
         for brand in all_brands:
-            if brand['name'].lower() == brand_name.lower():
+            brand_normalized = self.normalize_string(brand['name'])
+            if brand_normalized == normalized_input:
                 logger.info(f"✅ Найден бренд: {brand['name']}")
                 return brand
 
-        # Ищем частичное совпадение
+        # 2. Частичное совпадение
         for brand in all_brands:
-            if brand_name.lower() in brand['name'].lower() or brand['name'].lower() in brand_name.lower():
-                logger.info(f"✅ Найден бренд по частичному совпадению: {brand['name']}")
+            brand_normalized = self.normalize_string(brand['name'])
+            if normalized_input in brand_normalized or brand_normalized in normalized_input:
+                logger.info(f"✅ Найден по частичному: {brand['name']}")
                 return brand
 
         logger.warning(f"❌ Бренд не найден: {brand_name}")
@@ -79,14 +92,6 @@ class AgeDetector:
     async def detect(self, brand_name: str, serial_number: str, brand_type: str = 'foreign') -> AgeResult:
         """
         Основной метод определения возраста
-
-        Args:
-            brand_name: Название бренда
-            serial_number: Серийный номер
-            brand_type: 'foreign' или 'russian'
-
-        Returns:
-            AgeResult: Результат определения
         """
         try:
             # Очищаем серийный номер
@@ -98,37 +103,36 @@ class AgeDetector:
                     message="Не удалось распознать серийный номер."
                 )
 
-            # Извлекаем число из серийного номера
+            # Извлекаем число
             serial_num = self.extract_numbers(serial_clean)
             if serial_num is None:
                 return AgeResult(
                     found=False,
                     error="invalid_serial",
-                    message=f"Не удалось распознать серийный номер '{serial_number}'. Пожалуйста, введите номер в цифровом формате."
+                    message=f"Не удалось распознать серийный номер '{serial_number}'. Введите номер в цифровом формате."
                 )
 
-            # Ищем бренд (регистронезависимо)
+            logger.info(f"🔢 Серийный номер: {serial_num}")
+
+            # Ищем бренд
             brand = await self.find_brand(brand_name, brand_type)
             if not brand:
-                # Показываем доступные бренды
                 brands_list = await self.get_available_brands(brand_type)
                 brands_text = "\n".join([f"• {b}" for b in brands_list])
-
                 return AgeResult(
                     found=False,
                     error="brand_not_found",
-                    message=f"Бренд '{brand_name}' не найден в базе.\n\n💡 Проверьте написание или попробуйте ввести бренд на языке оригинала.\n\nДоступные бренды:\n{brands_text}"
+                    message=f"Бренд '{brand_name}' не найден.\n\nДоступные бренды:\n{brands_text}"
                 )
 
             # Ищем серийный номер
             range_data = await self.db.find_age_by_serial(brand['id'], serial_num)
 
-            # Проверяем, что range_data - это словарь, а не число
             if not range_data or not isinstance(range_data, dict):
                 return AgeResult(
                     found=False,
                     error="serial_not_found",
-                    message=f"Серийный номер {serial_clean} для бренда '{brand['name']}' не найден.\n\nВозможные причины:\n• Проверьте правильность ввода\n• Номер может быть на другой части инструмента\n• Возможно, номер относится к другой модели\n\n📞 Рекомендуем обратиться к мастеру для точной диагностики."
+                    message=f"Серийный номер {serial_clean} для бренда '{brand['name']}' не найден.\n\nПроверьте правильность ввода."
                 )
 
             # Успешный результат
@@ -150,19 +154,5 @@ class AgeDetector:
             return AgeResult(
                 found=False,
                 error="database_error",
-                message="База данных временно недоступна. Пожалуйста, попробуйте позже или обратитесь к администратору."
+                message="Произошла ошибка. Попробуйте позже."
             )
-
-    async def get_stats(self) -> Dict:
-        """Получение статистики по базе данных"""
-        brands_count = await self.db.get_brand_count()
-        ranges_count = await self.db.get_ranges_count()
-        foreign_count = await self.db.get_brand_count('foreign')
-        russian_count = await self.db.get_brand_count('russian')
-
-        return {
-            "total_brands": brands_count,
-            "total_ranges": ranges_count,
-            "foreign_brands": foreign_count,
-            "russian_brands": russian_count
-        }

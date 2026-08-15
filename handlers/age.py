@@ -1,16 +1,14 @@
 """
 Обработчик определения возраста инструмента
-Использует piano_age.db
 """
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from loguru import logger
-from age_detector import AgeDetector
+from age_detector import AgeDetector, AgeResult
 from age_database import AgeDatabase
 from keyboard.menus import MenuBuilder
 
-# Состояния для ConversationHandler
 SELECT_TYPE, BRAND_INPUT, SERIAL_INPUT = range(3)
 
 
@@ -27,19 +25,15 @@ class AgeHandler:
         query = update.callback_query
         await query.answer()
 
-        # Проверяем наличие брендов в базе
         total_brands = await self.age_db.get_brand_count()
-        logger.info(f"📊 Всего брендов в базе: {total_brands}")
 
         if total_brands == 0:
             await query.edit_message_text(
-                "❌ База данных брендов пока пуста.\n\n"
-                "Пожалуйста, обратитесь к администратору для загрузки данных.",
+                "❌ База данных брендов пока пуста.",
                 reply_markup=MenuBuilder.get_back_menu()
             )
             return ConversationHandler.END
 
-        # Показываем выбор типа
         keyboard = [
             [InlineKeyboardButton("🇪🇺 Иностранные", callback_data="age_foreign")],
             [InlineKeyboardButton("🇷🇺 Отечественные", callback_data="age_russian")],
@@ -48,8 +42,7 @@ class AgeHandler:
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(
-            "🔍 Определение возраста инструмента\n\n"
-            "Выберите тип инструмента:",
+            "🔍 Определение возраста инструмента\n\nВыберите тип инструмента:",
             reply_markup=reply_markup
         )
         return SELECT_TYPE
@@ -59,7 +52,6 @@ class AgeHandler:
         query = update.callback_query
         await query.answer()
 
-        # Сохраняем тип
         if query.data == "age_foreign":
             brand_type = "foreign"
             type_name = "иностранных"
@@ -70,26 +62,21 @@ class AgeHandler:
         context.user_data['brand_type'] = brand_type
         context.user_data['type_name'] = type_name
 
-        # Проверяем, есть ли бренды такого типа
         brands = await self.age_db.get_all_brands(brand_type)
         if not brands:
             await query.edit_message_text(
-                f"❌ В базе данных пока нет {type_name} брендов.\n\n"
-                f"База данных {type_name} будет добавлена позже.\n"
-                f"Пожалуйста, выберите другой тип.",
+                f"❌ В базе нет {type_name} брендов.",
                 reply_markup=MenuBuilder.get_back_menu()
             )
             return SELECT_TYPE
 
-        # Показываем поле для ввода бренда
         keyboard = [
             [InlineKeyboardButton("◀️ Назад", callback_data="age_back_to_type")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(
-            f"🏷️ Введите название бренда ({type_name} инструментов):\n\n"
-            f"(например: Steinway, Yamaha, Красный Октябрь, Аккорд)",
+            f"🏷️ Введите название бренда ({type_name} инструментов):",
             reply_markup=reply_markup
         )
         return BRAND_INPUT
@@ -100,23 +87,20 @@ class AgeHandler:
 
         if not brand_name:
             await update.message.reply_text(
-                "❌ Пожалуйста, введите название бренда:",
+                "❌ Введите название бренда:",
                 reply_markup=MenuBuilder.get_back_menu()
             )
             return BRAND_INPUT
 
         context.user_data['brand_name'] = brand_name
 
-        # Показываем поле для ввода серийного номера
         keyboard = [
             [InlineKeyboardButton("◀️ Назад", callback_data="age_back_to_brand")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            f"🔢 Введите серийный номер инструмента:\n\n"
-            f"Бренд: {brand_name}\n"
-            f"(указан на чугунной раме или за верхней декой)",
+            f"🔢 Введите серийный номер:\n\nБренд: {brand_name}",
             reply_markup=reply_markup
         )
         return SERIAL_INPUT
@@ -127,41 +111,37 @@ class AgeHandler:
 
         if not serial:
             await update.message.reply_text(
-                "❌ Пожалуйста, введите серийный номер:",
+                "❌ Введите серийный номер:",
                 reply_markup=MenuBuilder.get_back_menu()
             )
             return SERIAL_INPUT
 
-        # Получаем данные из контекста
         brand_name = context.user_data.get('brand_name', '')
         brand_type = context.user_data.get('brand_type', 'foreign')
 
-        # Выполняем поиск
         try:
             result = await self.detector.detect(brand_name, serial, brand_type)
         except Exception as e:
-            logger.error(f"Ошибка при поиске: {e}")
+            logger.error(f"Ошибка поиска: {e}")
             await update.message.reply_text(
-                "❌ Произошла ошибка при поиске. Попробуйте снова.",
+                "❌ Ошибка. Попробуйте снова.",
                 reply_markup=MenuBuilder.get_back_menu()
             )
             context.user_data.clear()
             return ConversationHandler.END
 
-        # Проверяем результат
-        if not result:
+        if not result or not isinstance(result, AgeResult):
             await update.message.reply_text(
-                "❌ Не удалось получить результат. Попробуйте снова.",
+                "❌ Ошибка. Попробуйте снова.",
                 reply_markup=MenuBuilder.get_back_menu()
             )
             context.user_data.clear()
             return ConversationHandler.END
 
         if result.found:
-            # Успешный результат
             result_text = (
-                "🎹 РЕЗУЛЬТАТ ОПРЕДЕЛЕНИЯ ВОЗРАСТА\n"
-                "═══════════════════════════════════\n\n"
+                "🎹 РЕЗУЛЬТАТ\n"
+                "═══════════════\n\n"
                 f"🏷️ Бренд: {result.brand or brand_name}\n"
                 f"🔢 Серийный номер: {result.serial or serial}\n"
                 f"📅 Год выпуска: {result.year if result.year else 'Не определён'}\n"
@@ -169,63 +149,40 @@ class AgeHandler:
 
             if result.country:
                 result_text += f"\n🌍 Страна: {result.country}"
-
             if result.info:
                 result_text += f"\n📌 Информация: {result.info}"
 
-            if result.model:
-                result_text += f"\n📐 Модель: {result.model}"
-
-            # Кнопки
             keyboard = [
                 [InlineKeyboardButton("🔄 Новый поиск", callback_data="age_start")],
                 [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            await update.message.reply_text(
-                result_text,
-                reply_markup=reply_markup
-            )
-
-            # Очищаем контекст
-            context.user_data.clear()
-            return ConversationHandler.END
-
+            await update.message.reply_text(result_text, reply_markup=reply_markup)
         else:
-            # Ошибка
             keyboard = [
                 [InlineKeyboardButton("🔄 Попробовать снова", callback_data="age_start")],
                 [InlineKeyboardButton("◀️ Главное меню", callback_data="main_menu")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            error_message = result.message if result.message else "Произошла ошибка при поиске."
+            error_message = result.message if result.message else "Ошибка."
+            await update.message.reply_text(f"❌ {error_message}", reply_markup=reply_markup)
 
-            await update.message.reply_text(
-                f"❌ {error_message}",
-                reply_markup=reply_markup
-            )
-
-            # Очищаем контекст
-            context.user_data.clear()
-            return ConversationHandler.END
+        context.user_data.clear()
+        return ConversationHandler.END
 
     # ==================== КНОПКИ НАЗАД ====================
 
     async def back_to_type(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Возврат к выбору типа"""
         query = update.callback_query
         await query.answer()
         context.user_data.clear()
 
-        # Проверяем наличие брендов в базе
         total_brands = await self.age_db.get_brand_count()
-
         if total_brands == 0:
             await query.edit_message_text(
-                "❌ База данных брендов пока пуста.\n\n"
-                "Пожалуйста, обратитесь к администратору для загрузки данных.",
+                "❌ База данных пуста.",
                 reply_markup=MenuBuilder.get_back_menu()
             )
             return ConversationHandler.END
@@ -238,14 +195,12 @@ class AgeHandler:
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(
-            "🔍 Определение возраста инструмента\n\n"
-            "Выберите тип инструмента:",
+            "🔍 Определение возраста\n\nВыберите тип:",
             reply_markup=reply_markup
         )
         return SELECT_TYPE
 
     async def back_to_brand(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Возврат к вводу бренда"""
         query = update.callback_query
         await query.answer()
         context.user_data.pop('brand_name', None)
@@ -258,14 +213,12 @@ class AgeHandler:
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         await query.edit_message_text(
-            f"🏷️ Введите название бренда ({type_name} инструментов):\n\n"
-            f"(например: Steinway, Yamaha, Красный Октябрь, Аккорд)",
+            f"🏷️ Введите бренд ({type_name}):",
             reply_markup=reply_markup
         )
         return BRAND_INPUT
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Отмена и возврат в главное меню"""
         query = update.callback_query
         await query.answer()
         context.user_data.clear()
