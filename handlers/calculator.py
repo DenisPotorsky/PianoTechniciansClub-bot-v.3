@@ -207,7 +207,7 @@ class CalculatorHandler:
             await update.message.reply_text(
                 f"✅ Общий диаметр: {total_diam:.3f} мм\n\n"
                 "📌 *Шаг 3 из 3*\n\n"
-                "Введите длину струны (в мм):\n"
+                "Введите длину навивки (в мм):\n"
                 "*(например: 950)*",
                 reply_markup=reply_markup,
                 parse_mode="Markdown"
@@ -223,7 +223,7 @@ class CalculatorHandler:
             return TOTAL_DIAM
 
     async def get_length(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Получение длины струны"""
+        """Получение длины навивки"""
         logger.info(f"get_length вызван. Текст: '{update.message.text}'")
 
         try:
@@ -234,7 +234,7 @@ class CalculatorHandler:
             if length <= 0:
                 await update.message.reply_text(
                     "❌ Длина должна быть положительным числом!\n\n"
-                    "Введите длину струны (в мм):",
+                    "Введите длину навивки (в мм):",
                     reply_markup=MenuBuilder.get_back_menu()
                 )
                 return LENGTH
@@ -248,7 +248,7 @@ class CalculatorHandler:
         except ValueError:
             await update.message.reply_text(
                 "❌ Ошибка! Введите корректное число (используйте точку или запятую).\n\n"
-                "Введите длину струны (в мм):",
+                "Введите длину навивки (в мм):",
                 reply_markup=MenuBuilder.get_back_menu()
             )
             return LENGTH
